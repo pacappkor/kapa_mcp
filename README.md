@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Private KAPA MCP adapter
 
+[MCP 어댑터 유지보수 안내](MAINTENANCE.md)
+
 이 패키지와 네 원본 저장소는 **private 유지**가 필수다. 공개 패키지 업로드,
 공개 저장소 생성, 공개 endpoint 배포를 하지 않는다. 기본 stdio와 명시적으로 켜는
 인증된 loopback Streamable HTTP를 제공하며 모델 API나 법령 API 키가 필요하지 않다.

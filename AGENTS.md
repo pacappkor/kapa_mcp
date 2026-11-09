@@ -1,5 +1,7 @@
 # KAPA MCP adapter
 
+- [MCP 어댑터 유지보수 안내](MAINTENANCE.md)
+
 - Keep this project and every upstream repository private. User explicitly reaffirmed this requirement on 2026-11-09. Do not publish packages or expose a public endpoint.
 - This project connects existing KAPA repositories; it does not duplicate their datasets, call model APIs, update upstream content, fetch law APIs, or manage upstream review status.
 - Never read credential files (`edu_gh_token.txt`, `law_oc.txt`) or expose environment secrets. Do not import upstream production code with credential fallback for read-only queries.
