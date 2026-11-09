@@ -111,6 +111,13 @@ def _allowed(repo, relative):
         return (p[0] in {"00-kapa-start", "laws", "appraisal-practice-standards"}
                 and p[-1] in {"SKILL.md", "source.md", "facets.md"})
     if repo == "kapa_knowledge":
+        if relative in {"catalogs/materials.json", "runs/pilot/held-items-research.json",
+                        "runs/pilot/predecessor-versions-research.json"}:
+            return True
+        if relative.startswith("vendor/kapa_skills/"):
+            inner = relative[len("vendor/kapa_skills/"):]
+            return inner == "docs/law-index.json" or bool(re.fullmatch(
+                r"sources/laws/[^/]+/versions/[^/]+\.json", inner))
         if relative in {"deps.lock", "docs/SCHEMA.md", "00-knowledge-start/SKILL.md",
                         "rules/knowledge-reading-rules/SKILL.md", "relations/relations.jsonl"}:
             return True
@@ -216,6 +223,52 @@ def _page(items, limit, offset):
             "limit": limit, "next_offset": nxt, "next_cursor": nxt}
 
 
+# Evidence storage uses a positive schema at every level. In particular a
+# recognized container never grants arbitrary nested keys permission to persist.
+_ASSERTION_FIELDS = {key: None for key in (
+    "source_id", "source_url", "asserted_replied", "citation", "reply_sha256",
+    "title", "upstream_url", "date")}
+_PROVENANCE_CATEGORY = frozenset({"source", "machine", "analysis", "review"})
+_ASSERTION_FIELDS["provenance"] = {key: _PROVENANCE_CATEGORY for key in _ASSERTION_FIELDS}
+_RECORD_FIELDS = {key: None for key in (
+    "id", "kind", "agency", "case_no", "material_type", "identity_status",
+    "publication_hold", "reference_status", "progress", "evidence_basis",
+    "evidence_file", "evidence_item", "evidence_sha256", "existing_document_id",
+    "asserted_replied", "reply_sha256", "source_envelope_status", "source_id",
+    "source_url", "upstream_url", "title")}
+_RECORD_FIELDS.update(source_identifiers={"lawgo": None, "epUnionSn": None},
+                      assertions=[_ASSERTION_FIELDS])
+_RECORD_FIELDS["provenance"] = {key: _PROVENANCE_CATEGORY for key in (*_RECORD_FIELDS, "limitations")}
+_METADATA_FIELDS = {key: None for key in (
+    "id", "name", "title", "source_url", "source_sha256", "precSeq", "expcSeq",
+    "cgmExpcDatSeq", "applied_version", "reference_status", "progress",
+    "material_type", "case_no", "replied", "decided", "agency")}
+_METADATA_FIELDS["kapa"] = {key: None for key in (
+    "exam", "subject", "subject_ko", "round", "year", "period", "seq", "number", "points")}
+_SELECTED_FIELDS = {key: None for key in (
+    "id", "repo", "path", "revision", "sha256", "head_verified", "dirty",
+    "reference_status", "progress", "version", "source_url", "publication_hold",
+    "kind", "title", "source_document_id", "metadata_sha256", "locked_revision",
+    "catalog_verified", "article_text_available", "applicability_verified", "review_verified")}
+_SELECTED_FIELDS.update(metadata=_METADATA_FIELDS, record=_RECORD_FIELDS,
+                        entries=[{key: None for key in (
+                            "lsiSeq", "efYd", "ancYd", "ancNo", "name", "kind", "status")}])
+
+
+def _metadata_projection(value, schema):
+    """Copy only scalar leaves explicitly declared by the metadata schema."""
+    _request_budget(entries=1)
+    if isinstance(schema, frozenset):
+        return value if isinstance(value, str) and value in schema else None
+    if schema is None:
+        return value if value is None or type(value) in (str, bool, int, float) else None
+    if isinstance(schema, list):
+        return [_metadata_projection(item, schema[0]) for item in value] if isinstance(value, list) else []
+    if not isinstance(value, dict):
+        return {}
+    return {key: _metadata_projection(value[key], rule) for key, rule in schema.items() if key in value}
+
+
 def _bounded(method):
     @wraps(method)
     def invoke(self, *args, **kwargs):
@@ -225,6 +278,8 @@ def _bounded(method):
         token = None
         if current is None or current["catalog"] is not self:
             token = _QUERY.set({"catalog": self, "states": {}, "manifests": {}, "reads": {},
+                                "supplemental": None, "supplemental_by_id": {},
+                                "supplemental_reads": {},
                                 "bytes_read": 0, "entries_visited": 0, "budget_error": None,
                                 "byte_limit": MAX_REQUEST_BYTES, "entry_limit": MAX_REQUEST_ENTRIES,
                                 "deadline": time.monotonic() + REQUEST_TIMEOUT})
@@ -423,10 +478,16 @@ class Catalog:
             query["reads"][(repo, relative, digest)] = {
                 fmt: hashlib.new(fmt, f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
                 for fmt in ("sha1", "sha256")}
+            query["reads"][(repo, relative, digest)]["byte_length"] = len(data)
             state = query["states"].get(repo)
             if state is not None and not self._head_matches(repo, relative, digest, state):
                 self._mismatch(state)
-        return text.replace("\r\n", "\n"), digest
+        result = (text.replace("\r\n", "\n"), digest)
+        if query is not None and repo == "kapa_knowledge" and relative in {
+                "catalogs/materials.json", "runs/pilot/held-items-research.json",
+                "runs/pilot/predecessor-versions-research.json"}:
+            query["supplemental_reads"][relative] = result
+        return result
 
     def _files(self, repo):
         root = self._root(repo)
@@ -434,7 +495,7 @@ class Catalog:
         # Do not even enumerate excluded .git, tools, credential or build trees.
         top = ({"00-kapa-start", "laws", "appraisal-practice-standards", "rules", "docs", "sources"}
                if repo == "kapa_skills" else
-               {"00-knowledge-start", "issues", "cases", "interpretations", "reviews", "relations", "rules", "docs", "sources", "runs"})
+               {"00-knowledge-start", "issues", "cases", "interpretations", "reviews", "relations", "rules", "docs", "sources", "runs", "vendor", "catalogs"})
         for base, dirs, files in os.walk(root, followlinks=False):
             parent = Path(base)
             # Charge every encountered entry before pruning or descending, even
@@ -737,6 +798,15 @@ class Catalog:
                     value = self._envelope(alias, path, digest, state, meta)
                     value.update(score=score, excerpt=text[:600], material_id=meta.get("id"))
                     results.append(value)
+            if alias == "kapa_knowledge" and (self._root(alias) / "catalogs/materials.json").exists():
+                data, _ = self._supplemental()
+                for record in data["records"]:
+                    score = _score(query, json.dumps(record, ensure_ascii=False))
+                    if score:
+                        value = self.read_material(record["id"])
+                        value.update(score=score, material_id=record["id"],
+                                     excerpt=str(record.get("title", ""))[:600], kind=record["kind"])
+                        results.append(value)
         results.sort(key=lambda x: (-x["score"], x["id"]))
         return {**_page(results, limit, offset), "dependency": dependency,
                 "repositories": states,
@@ -907,3 +977,255 @@ class Catalog:
                 "dependency": result["dependency"], "warnings": result["warnings"],
                 "status": result["status"], "next_steps": ["Read entry and topic SKILL documents", "Read complete source sections and applicable versions", "Inspect relations and review evidence"],
                 "coverage": "keyword candidates only; source and applicable-version verification remain required"}
+
+    @_bounded
+    def pinned_catalog(self, as_of=None):
+        """Verify the exact vendored dependency metadata, independently of live skills.
+
+        Version rows establish catalog availability only, never article text or
+        legal applicability. The lock and every metadata blob must match HEAD.
+        """
+        from datetime import date
+        if as_of is not None:
+            if not isinstance(as_of, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", as_of):
+                raise ValueError("as_of must be an ISO calendar date")
+            date.fromisoformat(as_of)
+        repo = "kapa_knowledge"
+        text, lock_hash = self._read(repo, "deps.lock")
+        lock = _json(text)["kapa_skills"]
+        pin, vendor = lock.get("commit"), lock.get("vendor", {})
+        files = vendor.get("files")
+        if (not isinstance(pin, str) or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", pin)
+                or vendor.get("commit") != pin or not isinstance(files, dict)
+                or not 1 <= len(files) <= 512 or "docs/law-index.json" not in files):
+            raise ValueError("Pinned metadata manifest unavailable")
+        parsed, sources = {}, []
+        state = self._git_state(repo)
+        for name, expected in sorted(files.items()):
+            if (not isinstance(name, str) or not _allowed(repo, "vendor/kapa_skills/" + name)
+                    or not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)):
+                raise ValueError("Invalid pinned metadata manifest")
+            path = "vendor/kapa_skills/" + name
+            content, digest = self._read(repo, path)
+            if digest != expected:
+                raise ValueError("Pinned metadata hash mismatch")
+            parsed[name] = _json(content)
+            sources.append({"document_id": f"{repo}:{path}", "sha256": digest,
+                            "revision": state["revision"],
+                            "byte_length": self._query()["reads"][(repo, path, digest)]["byte_length"],
+                            "head_verified": self._head_matches(repo, path, digest, state)})
+        index = parsed["docs/law-index.json"]
+        laws = index.get("laws")
+        if index.get("schema") != 1 or not isinstance(laws, dict):
+            raise ValueError("Invalid pinned law catalog")
+        expected_files = {"docs/law-index.json"} | {law["versions_file"] for law in laws.values() if law.get("versions_file")}
+        if set(files) != expected_files:
+            raise ValueError("Pinned metadata manifest does not match catalog")
+        candidates = []
+        for law_id, law in sorted(laws.items()):
+            path = law.get("versions_file")
+            if not path:
+                continue
+            versions = parsed[path]
+            if not isinstance(versions, dict) or versions.get("lsId") != law_id or not isinstance(versions.get("versions"), list):
+                raise ValueError("Pinned version identity mismatch")
+            eligible = []
+            for row in versions["versions"]:
+                _request_budget(entries=1)
+                effective, sequence = row.get("efYd"), row.get("lsiSeq")
+                if not isinstance(effective, str) or not re.fullmatch(r"[0-9]{8}", effective) or not isinstance(sequence, str) or not sequence.isascii() or not sequence.isdigit():
+                    raise ValueError("Invalid pinned version row")
+                date.fromisoformat(effective[:4] + "-" + effective[4:6] + "-" + effective[6:])
+                if as_of is not None and effective <= as_of.replace("-", ""):
+                    eligible.append((effective, sequence))
+            if eligible:
+                latest = max(value[0] for value in eligible)
+                candidates.append({"law_id": law_id, "effective_date": latest,
+                                   "version_ids": sorted({f"law/{law_id}@{seq}" for ef, seq in eligible if ef == latest})})
+        verified = (state["dirty"] is False and state["content_head_verified"]
+                    and self._head_matches(repo, "deps.lock", lock_hash, state)
+                    and all(source["head_verified"] for source in sources))
+        return {"locked_revision": pin, "lock_sha256": lock_hash, "resolved": bool(verified),
+                "mode": "hash_verified_vendor_metadata", "sources": sources,
+                "as_of": as_of, "date_candidates": candidates, "legal_verified": False,
+                "coverage": "pinned catalog/version metadata only; article text and legal applicability unverified"}
+
+    def _supplemental(self):
+        query = self._query()
+        if query is not None and query["supplemental"] is not None:
+            return query["supplemental"]
+        text, digest = self._supplemental_read("catalogs/materials.json")
+        data = _json(text)
+        if data.get("schema") != 1 or data.get("catalog_type") != "unpublished-evidence":
+            raise ValueError("Invalid supplemental evidence catalog")
+        records = data.get("records")
+        if not isinstance(records, list) or len(records) > 1000:
+            raise ValueError("Invalid supplemental evidence records")
+        seen = set()
+        for record in records:
+            identifier, kind = record.get("id"), record.get("kind")
+            pattern = r"faq/molit/lawgo/[0-9]+" if kind == "faq" else r"identity-hold/molit/[^/\s]+" if kind == "identity-hold" else r"(?!)"
+            if (not isinstance(identifier, str) or not re.fullmatch(pattern, identifier)
+                    or identifier in seen or record.get("publication_hold") is not True
+                    or (kind == "faq" and record.get("reference_status") != "unreviewed")
+                    or (kind == "faq" and (record.get("material_type") != "administrative-faq"
+                                          or record.get("case_no") != ""))
+                    or (kind == "identity-hold" and record.get("identity_status") != "unresolved")):
+                raise ValueError("Invalid supplemental identity or publication state")
+            seen.add(identifier)
+            if record.get("evidence_file") not in {"runs/pilot/held-items-research.json", "runs/pilot/predecessor-versions-research.json"}:
+                raise ValueError("Supplemental evidence path is outside fixed research allowlist")
+        result = data, digest
+        if query is not None:
+            query["supplemental"] = result
+            query["supplemental_by_id"] = {record["id"]: record for record in records}
+        return result
+
+    def _supplemental_read(self, path):
+        """Reuse exact bytes already charged/read in this request, never across requests."""
+        _request_budget()
+        query = self._query()
+        if query is not None and path in query["supplemental_reads"]:
+            return query["supplemental_reads"][path]
+        return self._read("kapa_knowledge", path)
+
+    @_bounded
+    def read_material(self, material_id):
+        """Read an unpublished FAQ/identity record or an exact historical version ID."""
+        if not isinstance(material_id, str) or len(material_id) > 1024:
+            raise ValueError("Invalid material ID")
+        match = re.fullmatch(r"law/([0-9]{6})@([0-9]+)", material_id)
+        if match:
+            pinned = self.pinned_catalog()
+            law_id, sequence = match.groups()
+            text, index_hash = self._read("kapa_knowledge", "vendor/kapa_skills/docs/law-index.json")
+            hashes = {source["document_id"]: source["sha256"] for source in pinned["sources"]}
+            if index_hash != hashes["kapa_knowledge:vendor/kapa_skills/docs/law-index.json"]:
+                raise ValueError("Pinned catalog changed during material read")
+            law = _json(text).get("laws", {}).get(law_id, {})
+            path = law.get("versions_file")
+            if not path:
+                raise ValueError("Historical version is absent from pinned catalog")
+            text, digest = self._read("kapa_knowledge", "vendor/kapa_skills/" + path)
+            if digest != hashes["kapa_knowledge:vendor/kapa_skills/" + path]:
+                raise ValueError("Pinned version changed during material read")
+            rows = [r for r in _json(text)["versions"] if r.get("lsiSeq") == sequence]
+            if not rows:
+                raise ValueError("Historical version is absent from pinned catalog")
+            return {"id": material_id, "kind": "historical-version-metadata",
+                    "entries": _metadata_projection(rows, _SELECTED_FIELDS["entries"]),
+                    "title": material_id, "source_document_id": "kapa_knowledge:vendor/kapa_skills/" + path,
+                    "metadata_sha256": digest, "locked_revision": pinned["locked_revision"],
+                    "catalog_verified": pinned["resolved"], "article_text_available": False,
+                    "applicability_verified": False, "review_verified": False,
+                    "missing_items": ["historical_article_text_unavailable", "legal_applicability_unverified"],
+                    "coverage": "exact pinned version membership only; no article or applicability evidence"}
+        data, digest = self._supplemental()
+        query = self._query()
+        record = query["supplemental_by_id"].get(material_id) if query is not None else next(
+            (r for r in data["records"] if r["id"] == material_id), None)
+        if record is None:
+            raise ValueError("Unknown supplemental material ID")
+        path = record["evidence_file"]
+        _, evidence_hash = self._supplemental_read(path)
+        if evidence_hash != record.get("evidence_sha256"):
+            raise ValueError("Supplemental evidence hash mismatch")
+        state = self._git_state("kapa_knowledge")
+        result = self._envelope("kapa_knowledge", "catalogs/materials.json", digest, state)
+        result.update(id=material_id, catalog_document_id="kapa_knowledge:catalogs/materials.json",
+                      title=record.get("title", material_id), source_url=record.get("source_url"),
+                      record=_metadata_projection(record, _RECORD_FIELDS),
+                      evidence_document_id="kapa_knowledge:" + path,
+                      evidence_sha256=evidence_hash, review_verified=False, source_verified=False,
+                      formal_interpretation=False, publication_hold=True,
+                      missing_items=["full_source_envelope_unavailable", "formal_identity_and_legal_review_unverified"],
+                      coverage="unpublished pilot evidence only; full source and legal verification unavailable")
+        return result
+
+    @_bounded
+    def capture_evidence(self, document_ids=None, question_ids=None, as_of=None):
+        """Capture bounded provenance, never a claim of complete legal research.
+
+        Nested reads share one Catalog budget and HEAD audit. Only metadata is
+        returned; the corpus stays in its owning repository.
+        """
+        from datetime import date
+        if as_of is not None:
+            if not isinstance(as_of, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", as_of):
+                raise ValueError("as_of must be an ISO calendar date")
+            date.fromisoformat(as_of)
+        selections = []
+        for values in (document_ids, question_ids):
+            if values is None:
+                values = []
+            if (not isinstance(values, (list, tuple)) or len(values) > 100
+                    or any(not isinstance(value, str) or len(value) > 1024 for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError("Evidence selections must contain at most 100 unique IDs")
+            selections.append(list(values))
+        documents, questions = selections
+        selected, anchors, missing = [], set(), []
+        for kind, ids, reader in (("document", documents, self.read_document),
+                                  ("question", questions, self.read_question)):
+            for identifier in ids:
+                supplemental = kind == "document" and identifier.startswith(("faq/", "identity-hold/", "law/"))
+                item = self.read_material(identifier) if supplemental else reader(identifier)
+                if identifier.startswith("law/"):
+                    selected.append(_metadata_projection(item, _SELECTED_FIELDS))
+                    missing.append({"id": identifier, "reason": "historical_article_text_and_applicability_unavailable"})
+                    continue
+                repo, path = item["repo"], item["path"]
+                anchors.add((repo, path))
+                if supplemental:
+                    anchors.add((repo, item["evidence_document_id"].split(":", 1)[1]))
+                    missing.append({"id": identifier, "reason": "unpublished_source_identity_or_full_source_unavailable"})
+                if kind == "question":
+                    anchors.add((repo, "subjects.json"))
+                    if item.get("common_document_id"):
+                        anchors.add((repo, item["common_document_id"].split(":", 1)[1]))
+                    if repo == "kapa_edu_1":
+                        anchors.add((repo, "answers/answers.csv"))
+                    if item.get("answer") is None:
+                        missing.append({"id": identifier, "reason": "official_answer_unavailable"})
+                selected.append(_metadata_projection(item, _SELECTED_FIELDS))
+                missing.append({"id": identifier, "reason": "applicable_date_and_version_not_verified"})
+                missing.append({"id": identifier, "reason": "legal_review_not_verified"})
+        dependency = self._dependency()
+        try:
+            pinned = self.pinned_catalog(as_of)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pinned = {"resolved": False, "mode": "unavailable", "legal_verified": False}
+        # Bind the dependency lock bytes as well as its parsed revision.
+        try:
+            self._read("kapa_knowledge", "deps.lock")
+            anchors.add(("kapa_knowledge", "deps.lock"))
+        except ValueError:
+            missing.append({"id": "kapa_knowledge:deps.lock", "reason": "dependency_lock_unavailable"})
+        query = self._query()
+        sources = []
+        for repo, path in sorted(anchors):
+            state = self._git_state(repo)
+            for (alias, relative, digest), blobs in sorted(query["reads"].items()):
+                if (alias, relative) == (repo, path):
+                    sources.append({"document_id": f"{repo}:{path}", "revision": state["revision"],
+                                    "sha256": digest, "git_blob": blobs.get(state.get("object_format")),
+                                    "byte_length": blobs["byte_length"],
+                                    "head_verified": self._head_matches(repo, path, digest, state)})
+        self._refresh_provenance(dependency)
+        self._refresh_provenance({"selected": selected})
+        states = [dict(query["states"][repo]) for repo in sorted(query["states"])]
+        reproducible = (bool(selected) and (dependency["resolved"] or pinned["resolved"])
+                        and all(s["head_verified"] for s in sources)
+                        and all(s["dirty"] is False and s["content_head_verified"] for s in states))
+        if not selected:
+            missing.append({"id": None, "reason": "no_sources_selected"})
+        if not reproducible:
+            missing.append({"id": None, "reason": "immutable_source_or_dependency_provenance_unresolved"})
+        return {"document_ids": documents, "question_ids": questions, "as_of": as_of,
+                "selected": selected, "sources": sources, "repositories": states,
+                "dependency": dependency, "pinned_catalog": pinned, "reproducible": bool(reproducible),
+                "coverage": {"scope": "selected stored sources only", "legal_verified": False,
+                             "complete_legal_research": False},
+                "checks": [{"check": "immutable_source_provenance", "passed": bool(reproducible)},
+                           {"check": "applicable_date_and_version", "passed": False},
+                           {"check": "legal_review", "passed": False}], "missing_items": missing}

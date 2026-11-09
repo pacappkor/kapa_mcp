@@ -68,6 +68,57 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_evidence_and_selected_plan_dispatch_and_fail_closed(self):
+        class Workflow(RecordingService):
+            valid = True
+            def validate_bundle(self, bundle_id):
+                return {"valid": self.valid, "stale": not self.valid, "checks": []}
+            def get_bundle(self, bundle_id):
+                return {"bundle_id": bundle_id, "question_ids": ["q2", "q1"],
+                        "legal_verified": False, "gaps": ["historical text missing"]}
+
+        class Renderer(RecordingService):
+            def get_plan(self, plan_id):
+                return {"question_ids": ["q2", "q1"], "evidence_bundle_id": "bundle-test",
+                        "require_evidence": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            workflow, renderer = Workflow(), Renderer()
+            server = create_server(Settings(root, root / "jobs"), catalog=RecordingService(),
+                                   renderer=renderer, workflow=workflow)
+            async with Client(server, mode="legacy", read_timeout_seconds=10) as client:
+                result = await client.call_tool("kapa_create_evidence_bundle", {
+                    "task": "research", "question_ids": ["q2", "q1"], "as_of": "2020-01-01"})
+                self.assertFalse(result.is_error)
+                self.assertEqual(workflow.calls[-1], ("create_bundle", ("research",), {
+                    "document_ids": None, "question_ids": ["q2", "q1"], "as_of": "2020-01-01"}))
+                result = await client.call_tool("kapa_get_evidence_bundle", {"bundle_id": "bundle-test"})
+                self.assertFalse(json.loads(result.content[0].text)["legal_verified"])
+                result = await client.call_tool("kapa_validate_evidence_bundle", {"bundle_id": "bundle-test"})
+                self.assertFalse(result.is_error)
+                result = await client.call_tool("kapa_create_render_plan", {
+                    "question_ids": ["q2", "q1"], "evidence_bundle_id": "bundle-test", "require_evidence": True})
+                self.assertFalse(result.is_error)
+                self.assertEqual(renderer.calls[-1], ("create_plan", (["q2", "q1"],), {
+                    "noanswers": True, "include_instructions": True,
+                    "evidence_bundle_id": "bundle-test", "require_evidence": True}))
+                for arguments in (
+                    {"question_ids": ["q1"], "require_evidence": True},
+                    {"question_ids": ["uncaptured"], "evidence_bundle_id": "bundle-test"},
+                ):
+                    count = len(renderer.calls)
+                    self.assertTrue((await client.call_tool("kapa_create_render_plan", arguments)).is_error)
+                    self.assertEqual(len(renderer.calls), count)
+                self.assertFalse((await client.call_tool("kapa_get_render_plan", {"plan_id": "plan-test"})).is_error)
+                self.assertFalse((await client.call_tool("kapa_start_render_plan", {"plan_id": "plan-test"})).is_error)
+                count = len(renderer.calls)
+                workflow.valid = False
+                self.assertTrue((await client.call_tool("kapa_start_render_plan", {"plan_id": "plan-test"})).is_error)
+                self.assertEqual(len(renderer.calls), count)
+                # Formatting needs no bundle or legal verification claim.
+                self.assertFalse((await client.call_tool("kapa_create_render_plan", {"question_ids": ["q1"]})).is_error)
+
     async def test_legacy_initialize_tools_resources_prompt_and_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -80,15 +131,19 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(client.server_info.name, "kapa-mcp")
                 listed = await client.list_tools()
                 tools = {tool.name: tool for tool in listed.tools}
-                self.assertEqual(len(tools), 10)
+                self.assertEqual(len(tools), 17)
                 for name, tool in tools.items():
                     self.assertTrue(name.startswith("kapa_"))
                     annotations = tool.annotations.model_dump(by_alias=True)
-                    self.assertEqual(annotations["readOnlyHint"], name != "kapa_start_render")
+                    self.assertEqual(annotations["readOnlyHint"], name not in {
+                        "kapa_start_render", "kapa_create_evidence_bundle",
+                        "kapa_create_render_plan", "kapa_start_render_plan",
+                    })
                     self.assertFalse(annotations["destructiveHint"])
                     self.assertFalse(annotations["openWorldHint"])
 
                 cases = [
+                    ("kapa_read_material", {"material_id": "faq/demo"}, catalog, "read_material", ("faq/demo",), {}),
                     ("kapa_list_repositories", {}, catalog, "list_repositories", (), {}),
                     ("kapa_route_task", {"task": "미불용지 문제지"}, catalog, "route_task", ("미불용지 문제지",), {}),
                     ("kapa_search_questions", {"query": "토지", "exam": 2, "round": "37", "offset": 3}, catalog,
@@ -130,7 +185,8 @@ class ProtocolTests(unittest.IsolatedAsyncioTestCase):
                 (root / alias).mkdir()
             params = StdioServerParameters(
                 command=sys.executable, args=["-I", "-B", "-m", "kapa_mcp"],
-                env={"KAPA_WORKSPACE": str(root), "KAPA_JOBS_DIR": str(root / "jobs")},
+                env={"KAPA_WORKSPACE": str(root), "KAPA_JOBS_DIR": str(root / "jobs"),
+                     "KAPA_TRANSPORT": "stdio"},
             )
             async with asyncio.timeout(20):
                 async with Client(params, mode="legacy", read_timeout_seconds=10) as client:

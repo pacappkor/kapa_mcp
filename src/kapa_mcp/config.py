@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Explicit local configuration, without credential discovery or file reads."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import stat
@@ -12,6 +12,37 @@ REPOSITORIES = ("kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge")
 
 class ConfigurationError(ValueError):
     """A configuration error safe to report on stderr."""
+
+
+@dataclass(frozen=True)
+class HTTPSettings:
+    """Private transport options; the bearer is never included in repr/errors."""
+
+    token: str = field(repr=False)
+    port: int = 8765
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.token, str) or len(self.token) < 32
+                or not self.token.isascii() or any(c.isspace() for c in self.token)
+                or any(ord(c) < 33 or ord(c) > 126 for c in self.token)):
+            raise ConfigurationError("KAPA_HTTP_TOKEN must contain at least 32 printable ASCII characters without whitespace")
+        if type(self.port) is not int or not 1024 <= self.port <= 65535:
+            raise ConfigurationError("KAPA_HTTP_PORT must be an integer from 1024 through 65535")
+
+    @classmethod
+    def from_env(cls) -> "HTTPSettings":
+        try:
+            port = int(os.environ.get("KAPA_HTTP_PORT", "8765"))
+        except ValueError:
+            raise ConfigurationError("KAPA_HTTP_PORT must be an integer from 1024 through 65535") from None
+        return cls(token=os.environ.get("KAPA_HTTP_TOKEN", ""), port=port)
+
+
+def transport_from_env() -> str:
+    transport = os.environ.get("KAPA_TRANSPORT", "stdio")
+    if transport not in ("stdio", "streamable-http"):
+        raise ConfigurationError("KAPA_TRANSPORT must be stdio or streamable-http")
+    return transport
 
 
 @dataclass(frozen=True)

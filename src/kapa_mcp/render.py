@@ -11,8 +11,13 @@ elapsed time, copied files/bytes, output files/bytes and retained log bytes.
 
 Artifact responses contain metadata and a local download_path, never binary
 chunks. The stdio server must keep one manager per owner/session; an HTTP
-transport must additionally authenticate downloads. Registries intentionally
-do not discover jobs from disk or survive a manager restart.
+transport must additionally authenticate downloads. Registries restore only authenticated, bounded metadata from this jobs directory.
+This is a local single-user registry, not a multiuser security boundary. Registry
+writes merge under a process lock; no processes are resumed after restart.
+The registry retains at most MAX_JOBS job IDs and MAX_JOBS plan IDs. Capacity
+retires the oldest unlocked terminal job metadata and plans unused by live jobs.
+Retired IDs no longer support lookup/start; all files, including PDFs, remain
+on disk. This is lookup retention, not a disk quota or automatic file deletion.
 
 Workers are non-daemon: graceful stdio/interpreter exit waits for active renders
 to finish or time out and clean up their owned process families. This can delay
@@ -24,7 +29,9 @@ from __future__ import annotations
 
 import copy
 import codecs
+from contextlib import contextmanager, nullcontext
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -38,6 +45,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 import uuid
+
+from . import planning
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -109,6 +118,51 @@ def _check_source_handle(stream, expected):
             or getattr(opened, "st_file_attributes", 0) & 0x400
             or any(getattr(opened, field) != getattr(expected, field) for field in fields)):
         raise RenderError("Source handle changed during copy")
+
+
+def _file_lock(path, *, wait=True):
+    """Return an owned OS lock handle, or None for a busy nonblocking lock."""
+    _safe(path)
+    if path.exists():
+        _regular(path, 1)
+    try:
+        with path.open('xb') as initial:
+            initial.write(b'0')
+    except FileExistsError:
+        pass
+    _regular(path, 1)
+    stream = path.open('r+b')
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            stream.seek(0)
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return stream
+        except OSError:
+            if not wait or time.monotonic() >= deadline:
+                stream.close()
+                if wait:
+                    raise RenderError("Registry lock unavailable") from None
+                return None
+            time.sleep(.02)
+
+
+def _unlock(stream):
+    try:
+        stream.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_UN)
+    finally:
+        stream.close()
 
 
 class _WindowsJob:
@@ -196,7 +250,7 @@ class RenderManager:
     MAX_OUTPUT_BYTES = 128 * 1024 * 1024
     MAX_LOG_BYTES = 256 * 1024
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, evidence_validator=None):
         self.workspace = _safe(Path(settings.workspace))
         self.jobs_dir = _safe(Path(settings.jobs_dir))
         for alias in ("kapa_edu_1", "kapa_edu_2", "kapa_skills", "kapa_knowledge", "kapa_mcp"):
@@ -208,8 +262,428 @@ class RenderManager:
         self._jobs: dict[str, dict] = {}
         self._artifacts: dict[str, dict[str, dict]] = {}
         self._copied_inputs: dict[str, tuple[dict[Path, tuple], set[Path]]] = {}
+        self._plans: dict[str, dict] = {}
+        self._registry_jobs: dict[str, str] = {}
+        self._registry_plans: dict[str, str] = {}
+        self._job_locks = {}
+        self._owned_jobs = set()
+        self._job_digests = {}
+        self._plan_digests = {}
+        self._registry_identity = None
+        self._evidence_validator = evidence_validator
+        self._restore_registry()
+
+    REGISTRY_BYTES = 1024 * 1024
+    MANIFEST_BYTES = 2 * 1024 * 1024
+
+    @contextmanager
+    def _registry_lock(self):
+        stream = _file_lock(self.jobs_dir / '.registry.lock')
+        try:
+            yield
+        finally:
+            _unlock(stream)
+
+    def _metadata_bytes(self, path, limit):
+        info = _regular(path, limit)
+        with path.open('rb') as stream:
+            _check_source_handle(stream, info)
+            data = stream.read(limit + 1)
+            _check_source_handle(stream, info)
+        if len(data) > limit or len(data) != info.st_size:
+            raise RenderError("Registry metadata budget exceeded")
+        return data
+
+    def _read_json(self, path, limit):
+        data = self._metadata_bytes(path, limit)
+        try:
+            return json.loads(data)
+        except (ValueError, RecursionError):
+            raise RenderError("Invalid registry metadata") from None
+
+    @staticmethod
+    def _uuid(value):
+        return isinstance(value, str) and re.fullmatch(
+            r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', value) is not None
+
+    def _registry_read(self):
+        path = self.jobs_dir / '.registry.json'
+        if not path.exists():
+            return {'jobs': {}, 'plans': {}}
+        record = self._read_json(path, self.REGISTRY_BYTES)
+        if not isinstance(record, dict) or set(record) != {'data', 'mac'}:
+            raise RenderError("Invalid registry metadata")
+        data = record['data']
+        mac = hmac.new(self._registry_key, self._json_bytes(data), hashlib.sha256).hexdigest()
+        if not isinstance(record['mac'], str) or not hmac.compare_digest(mac, record['mac']):
+            raise RenderError("Registry authentication failed")
+        if not isinstance(data, dict) or set(data) != {'jobs', 'plans'}:
+            raise RenderError("Invalid registry metadata")
+        for entries in data.values():
+            if not isinstance(entries, dict) or len(entries) > self.MAX_JOBS:
+                raise RenderError("Registry entry budget exceeded")
+            for identifier, digest in entries.items():
+                if not self._uuid(identifier) or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+                    raise RenderError("Invalid registry identifier")
+        return data
+
+    def _save_registry(self, *, locked=False):
+        with nullcontext() if locked else self._registry_lock():
+            data = self._registry_read()
+            # Absence is a tombstone for an ID this manager previously loaded.
+            # Merge only new UUIDs/owned updates, never a stale registry snapshot.
+            if any(key in self._job_digests and key not in data['jobs'] for key in self._registry_jobs):
+                raise RenderError("Job metadata was retired")
+            data['jobs'].update(self._registry_jobs)
+            data['plans'].update(self._registry_plans)
+            self._retire_metadata(data)
+            record = {'data': data, 'mac': hmac.new(
+                self._registry_key, self._json_bytes(data), hashlib.sha256).hexdigest()}
+            encoded = self._json_bytes(record)
+            if len(encoded) > self.REGISTRY_BYTES:
+                raise RenderError("Registry metadata budget exceeded")
+            self._atomic_metadata(self.jobs_dir / '.registry.json', encoded, self.REGISTRY_BYTES)
+            self._job_digests.update(self._registry_jobs)
+            self._plan_digests.update(self._registry_plans)
+            self._forget_retired(data)
+            self._registry_identity = _file_identity((self.jobs_dir / '.registry.json').stat())
+            # Only dirty entries are merged; stale restored views cannot replace
+            # another process's newer manifest digest.
+            self._registry_jobs.clear()
+            self._registry_plans.clear()
+
+    def _retire_metadata(self, data):
+        """Prune only authenticated metadata under the registry lock; no unlink."""
+        if all(len(entries) <= self.MAX_JOBS for entries in data.values()):
+            return
+        terminal, live_plans = [], set()
+        for job_id, digest in data['jobs'].items():
+            path = self.jobs_dir / job_id / 'manifest.json'
+            job = self._registered_json(path, digest)
+            handle = _file_lock(self.jobs_dir / job_id / 'owner.lock', wait=False)
+            if handle is not None:
+                _unlock(handle)
+            # An unlocked nonterminal manifest is an interrupted worker, as in
+            # recovery; it must not pin lookup capacity forever after a crash.
+            live = handle is None
+            if live:
+                if job.get('plan_id'):
+                    live_plans.add(job['plan_id'])
+            elif job_id not in self._registry_jobs:
+                terminal.append((path.stat().st_mtime_ns, job_id))
+        for _, job_id in sorted(terminal):
+            if len(data['jobs']) <= self.MAX_JOBS:
+                break
+            del data['jobs'][job_id]
+        candidates = []
+        if len(data['plans']) > self.MAX_JOBS:
+            for plan_id in data['plans']:
+                if plan_id not in live_plans and plan_id not in self._registry_plans:
+                    path = _safe(self.jobs_dir / 'plans' / (plan_id + '.json'))
+                    candidates.append((_regular(path, self.MANIFEST_BYTES).st_mtime_ns, plan_id))
+        for _, plan_id in sorted(candidates):
+            if len(data['plans']) <= self.MAX_JOBS:
+                break
+            del data['plans'][plan_id]
+        if any(len(entries) > self.MAX_JOBS for entries in data.values()):
+            raise RenderError("Persistent registry is full with active jobs/plans")
+
+    def _forget_retired(self, data):
+        for job_id in set(self._jobs) - data['jobs'].keys() - self._job_locks.keys():
+            self._jobs.pop(job_id, None)
+            self._artifacts.pop(job_id, None)
+            self._copied_inputs.pop(job_id, None)
+            self._job_digests.pop(job_id, None)
+            self._owned_jobs.discard(job_id)
+        for plan_id in set(self._plans) - data['plans'].keys():
+            self._plans.pop(plan_id, None)
+            self._plan_digests.pop(plan_id, None)
+
+    def _registry_changed(self):
+        path = _safe(self.jobs_dir / '.registry.json')
+        current = _file_identity(_regular(path, self.REGISTRY_BYTES)) if path.exists() else None
+        return current != self._registry_identity
+
+    def _atomic_metadata(self, path, data, limit):
+        if len(data) > limit:
+            raise RenderError("Registry metadata budget exceeded")
+        _safe(path)
+        if path.exists():
+            _regular(path, limit)
+        temporary = _safe(path.with_name(path.name + '.tmp'))
+        if temporary.exists():
+            _regular(temporary, limit)
+        temporary.write_bytes(data)
+        temporary.replace(path)
+
+    def _save_plan(self, plan):
+        directory = _safe(self.jobs_dir / 'plans')
+        directory.mkdir(exist_ok=True)
+        data = self._json_bytes(plan)
+        self._atomic_metadata(directory / (plan['plan_id'] + '.json'), data, self.MANIFEST_BYTES)
+        self._registry_plans[plan['plan_id']] = hashlib.sha256(data).hexdigest()
+        self._save_registry()
+
+    def _registered_json(self, path, digest):
+        data = self._metadata_bytes(path, self.MANIFEST_BYTES)
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise RenderError("Registered metadata changed")
+        try:
+            return json.loads(data)
+        except (ValueError, RecursionError):
+            raise RenderError("Invalid registered metadata") from None
+
+    def _validate_artifacts(self, job):
+        artifacts = job.get('artifacts')
+        if not isinstance(artifacts, list) or len(artifacts) > self.MAX_FILES:
+            raise RenderError("Invalid artifact registry")
+        result, size = {}, 0
+        for item in artifacts:
+            if not isinstance(item, dict) or not self._uuid(item.get('artifact_id')):
+                raise RenderError("Invalid artifact registry")
+            rel = item.get('path')
+            if (not isinstance(rel, str) or not re.fullmatch(
+                    r'(?:stdout\.log|stderr\.log|diagnostics/[A-Za-z0-9_-]+\.log|snapshot/build/[A-Za-z0-9_-]+\.(?:pdf|json))', rel)):
+                raise RenderError("Invalid artifact path")
+            path = self.jobs_dir / job['job_id'] / rel
+            info = _regular(path, self.MAX_FILE_BYTES)
+            if info.st_size != item.get('size_bytes') or _digest(path) != item.get('sha256'):
+                raise RenderError("Artifact changed after registration")
+            size += info.st_size
+            if size > self.MAX_OUTPUT_BYTES:
+                raise RenderError("Artifact byte budget exceeded")
+            if item['artifact_id'] in result:
+                raise RenderError("Duplicate artifact identifier")
+            result[item['artifact_id']] = item
+        return result
+
+    def _restore_registry(self):
+        with self._registry_lock():
+            key = _safe(self.jobs_dir / '.registry.key')
+            if not key.exists():
+                if (self.jobs_dir / '.registry.json').exists():
+                    raise RenderError("Registry ownership key is missing")
+                with key.open('xb') as stream:
+                    stream.write(os.urandom(32))
+                key.chmod(0o600)
+            _regular(key, 32)
+            self._registry_key = self._metadata_bytes(key, 32)
+            if len(self._registry_key) != 32:
+                raise RenderError("Invalid registry ownership key")
+        self._refresh_registry()
+
+    def _refresh_registry(self):
+        with self._lock, self._registry_lock():
+            data = self._registry_read()
+            self._forget_retired(data)
+            for plan_id, digest in data['plans'].items():
+                if self._plan_digests.get(plan_id) == digest:
+                    continue
+                plan = self._registered_json(self.jobs_dir / 'plans' / (plan_id + '.json'), digest)
+                if not isinstance(plan, dict) or plan.get('plan_id') != plan_id:
+                    raise RenderError("Invalid plan metadata")
+                self._plans[plan_id] = plan
+                self._validated_plan(plan_id)
+                self._plan_digests[plan_id] = digest
+            for job_id, digest in data['jobs'].items():
+                if job_id in self._job_locks:
+                    continue
+                if self._job_digests.get(job_id) == digest:
+                    job = self._jobs[job_id]
+                    if job['status'] not in ('preparing', 'queued', 'running'):
+                        continue
+                else:
+                    job = self._registered_json(self.jobs_dir / job_id / 'manifest.json', digest)
+                if not isinstance(job, dict) or job.get('job_id') != job_id:
+                    raise RenderError("Invalid job metadata")
+                if job.get('status') not in ('preparing', 'queued', 'running', 'succeeded', 'failed', 'missing_dependency', 'timed_out'):
+                    raise RenderError("Invalid job status")
+                if job['status'] in ('preparing', 'queued', 'running'):
+                    handle = _file_lock(self.jobs_dir / job_id / 'owner.lock', wait=False)
+                    if handle is not None:
+                        _unlock(handle)
+                        job.update(status='failed', error='Render interrupted; no process was resumed', artifacts=[])
+                self._jobs[job_id] = job
+                self._artifacts[job_id] = self._validate_artifacts(job)
+                self._job_digests[job_id] = digest
+            registry = self.jobs_dir / '.registry.json'
+            self._registry_identity = _file_identity(registry.stat()) if registry.exists() else None
+
+    @staticmethod
+    def _json_bytes(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _read_source(self, path):
+        info = _regular(path, self.MAX_FILE_BYTES)
+        with path.open("rb") as stream:
+            _check_source_handle(stream, info)
+            data = stream.read(self.MAX_FILE_BYTES + 1)
+            _check_source_handle(stream, info)
+        if len(data) != info.st_size:
+            raise RenderError("Source changed during read")
+        return data
+
+    def _source_files(self, repo, subject, rounds, seq=None):
+        files = [repo / "subjects.json", repo / "tools" / "build.py", repo / "latex" / "kapa-exam.sty"]
+        walked = 0
+        for rd in rounds:
+            source = _safe(repo / subject / rd)
+            if not source.is_dir():
+                raise RenderError("Round directory not found")
+            fragments = []
+            for base, dirs, names in os.walk(source, followlinks=False):
+                for name in dirs + names:
+                    walked += 1
+                    if walked > self.MAX_FILES:
+                        raise RenderError("Input file count budget exceeded")
+                    _safe(Path(base) / name)
+                dirs[:] = sorted(d for d in dirs if re.fullmatch(r"[A-Za-z0-9_-]+", d))
+                for name in sorted(names):
+                    path = Path(base) / name
+                    if path.parent == source and re.fullmatch(r"[0-9]{2}\.tex", name):
+                        if seq is None or name in ("00.tex", f"{seq}.tex"):
+                            fragments.append(path)
+                    elif (path.parent == source / "figures" and path.suffix.lower() in _ASSETS
+                          and re.fullmatch(r"[0-9]{2}-[A-Za-z0-9_-]+\.(?:png|jpe?g|pdf)", name, re.I)
+                          and (seq is None or name.startswith(seq + "-"))):
+                        files.append(path)
+            if seq and source / f"{seq}.tex" not in fragments:
+                raise RenderError("Question not found")
+            if not any(p.name != "00.tex" for p in fragments):
+                raise RenderError("Round has no question fragments")
+            files.extend(fragments)
+        if len(files) > self.MAX_FILES:
+            raise RenderError("Input file count budget exceeded")
+        return files
+
+    def _plan_sources(self, exam, subject, rounds):
+        repo = _safe(self.workspace / f"kapa_edu_{exam}")
+        config = _safe(repo / "subjects.json")
+        _regular(config, 65536)
+        subjects = json.loads(self._read_source(config))
+        if subject not in {s['folder'] for s in subjects['subjects']}:
+            raise RenderError("Subject is not in subjects.json")
+        hashes, total = {}, 0
+        for path in self._source_files(repo, subject, rounds):
+            data = self._read_source(path)
+            total += len(data)
+            if total > self.MAX_COPY_BYTES:
+                raise RenderError("Input byte budget exceeded")
+            hashes[path.relative_to(repo).as_posix()] = hashlib.sha256(data).hexdigest()
+        if hashes['tools/build.py'] not in _BUILD_HASHES:
+            raise RenderError("Unreviewed build.py; source digest is not approved")
+        return hashes
+
+    def _check_evidence(self, plan):
+        bundle = plan['evidence_bundle_id']
+        if plan['require_evidence'] and not bundle:
+            raise RenderError("Evidence bundle is required")
+        if bundle is not None:
+            if (not isinstance(bundle, str) or len(bundle) > 128
+                    or not re.fullmatch(r"[A-Za-z0-9_-]+", bundle)):
+                raise RenderError("Invalid evidence bundle ID")
+            if self._evidence_validator is None:
+                raise RenderError("Evidence validation hook is required for bound plans")
+            self._evidence_validator(bundle, list(plan['question_ids']))
+
+    def create_plan(self, question_ids: list[str], noanswers=True,
+                    include_instructions=True, evidence_bundle_id=None, require_evidence=False) -> dict:
+        try:
+            rows = planning.selection(question_ids)
+        except ValueError as exc:
+            raise RenderError(str(exc)) from None
+        if any(type(v) is not bool for v in (noanswers, include_instructions, require_evidence)):
+            raise RenderError("Plan policy flags must be boolean")
+        exam, subject = int(rows[0][0]), rows[0][1]
+        rounds = list(dict.fromkeys(row[2] for row in rows))
+        plan = dict(plan_id=str(uuid.uuid4()), question_ids=list(question_ids), exam=exam,
+                    subject=subject, rounds=rounds, noanswers=noanswers,
+                    include_instructions=include_instructions, evidence_bundle_id=evidence_bundle_id,
+                    require_evidence=require_evidence, numbering="sequential_from_1",
+                    instructions_policy="before_each_contiguous_round_block", warnings=[
+                        "Source hashes cover all numbered fragments and allowed figures in selected rounds.",
+                        "Printed question labels are sequential; internal references and instruction text retain original numbering."])
+        if evidence_bundle_id is None:
+            plan['warnings'].append("Formatting only: no evidence bundle is bound or verified.")
+        self._check_evidence(plan)
+        plan['source_hashes'] = self._plan_sources(exam, subject, rounds)
+        repo = self.workspace / f"kapa_edu_{exam}"
+        for number, (_, _, rd, seq) in enumerate(rows, 1):
+            path = repo / subject / rd / f"{seq}.tex"
+            if path.relative_to(repo).as_posix() not in plan['source_hashes']:
+                raise RenderError("Question not found")
+            try:
+                planning.renumber(self._read_source(path).decode('utf-8'), number, exam)
+            except ValueError as exc:
+                raise RenderError(str(exc)) from None
+        plan['plan_hash'] = hashlib.sha256(self._json_bytes(plan)).hexdigest()
+        with self._lock:
+            self._plans[plan['plan_id']] = plan
+            try:
+                self._save_plan(plan)
+            except Exception:
+                del self._plans[plan['plan_id']]
+                self._registry_plans.pop(plan['plan_id'], None)
+                raise
+        return copy.deepcopy(plan)
+
+    def get_plan(self, plan_id) -> dict:
+        if self._uuid(plan_id) and (plan_id not in self._plans or self._registry_changed()):
+            self._refresh_registry()
+        return self._validated_plan(plan_id)
+
+    def _validated_plan(self, plan_id):
+        with self._lock:
+            if not isinstance(plan_id, str) or plan_id not in self._plans:
+                raise RenderError("Unknown or unowned plan ID")
+            plan = copy.deepcopy(self._plans[plan_id])
+            value = plan.pop('plan_hash')
+            if hashlib.sha256(self._json_bytes(plan)).hexdigest() != value:
+                raise RenderError("Plan changed after registration")
+            plan['plan_hash'] = value
+            return plan
+
+    def start_render_plan(self, plan_id) -> dict:
+        plan = self.get_plan(plan_id)
+        self._check_evidence(plan)
+        if self._plan_sources(plan['exam'], plan['subject'], plan['rounds']) != plan['source_hashes']:
+            raise RenderError("Plan sources changed; create a new plan")
+        return self._start_render(plan['exam'], plan['subject'], plan['rounds'][0],
+                                  noanswers=plan['noanswers'], _plan=plan)
+
+    def _prepare_selection(self, snapshot, plan, copied_files, copied_dirs):
+        generated = {snapshot / 'selection_driver.py': planning.DRIVER.encode('utf-8')}
+        body, previous = [], None
+        for number, (_, subject, rd, seq) in enumerate(planning.selection(plan['question_ids']), 1):
+            directory = snapshot / subject / rd
+            if previous != rd:
+                body.append(r"\section*{Round %s}" % rd)
+                if plan['include_instructions'] and (directory / '00.tex').is_file():
+                    body.append(r"\subimport{../%s/%s/}{00.tex}" % (subject, rd))
+            previous = rd
+            text = (directory / f'{seq}.tex').read_text(encoding='utf-8')
+            dest = directory / f'selected_{number:03}.tex'
+            generated[dest] = planning.renumber(text, number, plan['exam']).encode('utf-8')
+            body.append(r"\subimport{../%s/%s/}{%s}" % (subject, rd, dest.name))
+        opt = '[noanswers]' if plan['noanswers'] else ''
+        wrapper = (r"\documentclass[10pt,a4paper]{article}" + '\n'
+                   + r"\usepackage[margin=18mm]{geometry}" + '\n'
+                   + r"\usepackage%s{kapa-exam}" % opt + '\n'
+                   + r"\begin{document}" + '\n' + '\n'.join(body) + '\n'
+                   + r"\end{document}" + '\n')
+        generated[snapshot / 'selection.tex'] = wrapper.encode('utf-8')
+        if (len(copied_files) + len(generated) > self.MAX_FILES or
+                sum(p.stat().st_size for p in copied_files) + sum(map(len, generated.values())) > self.MAX_COPY_BYTES):
+            raise RenderError("Selection input budget exceeded")
+        for path, data in generated.items():
+            with path.open('xb') as stream:
+                stream.write(data)
+            copied_files[path] = _file_identity(path.stat())
 
     def start_render(self, exam, subject, round, question_id=None, noanswers=True):
+        return self._start_render(exam, subject, round, question_id, noanswers)
+
+    def _start_render(self, exam, subject, round, question_id=None, noanswers=True, *, _plan=None):
         if isinstance(exam, bool) or str(exam) not in ("1", "2"):
             raise RenderError("exam must be 1 or 2")
         if not isinstance(subject, str) or not _SUBJECT.fullmatch(subject):
@@ -228,14 +702,13 @@ class RenderManager:
             if not _QUESTION.fullmatch(seq) or seq == "00":
                 raise RenderError("Invalid question identifier")
         with self._lock:
-            if len(self._jobs) >= self.MAX_JOBS:
-                raise RenderError("Session job registry is full")
             if not self._slots.acquire(blocking=False):
                 raise RenderError("Concurrent render limit reached")
             job_id = str(uuid.uuid4())
             job_dir = _safe(self.jobs_dir / job_id)
             try:
                 job_dir.mkdir(mode=0o700)
+                self._job_locks[job_id] = _file_lock(job_dir / 'owner.lock')
             except Exception:
                 self._slots.release()
                 raise
@@ -243,8 +716,14 @@ class RenderManager:
                    "subject": subject, "round": rd, "question_id": question_id,
                    "noanswers": noanswers, "artifacts": [], "warnings": list(_LIMITATIONS)}
             self._jobs[job_id] = job
+            self._owned_jobs.add(job_id)
             self._artifacts[job_id] = {}
+        registered = False
         try:
+            if _plan is not None:
+                job.update(plan_id=_plan['plan_id'], plan=copy.deepcopy(_plan))
+            self._update(job_id, status='preparing')
+            registered = True
             self._prepare(job_dir, job, seq)
             self._update(job_id, status="queued")
             threading.Thread(target=self._run, args=(job_id,), daemon=False).start()
@@ -253,9 +732,16 @@ class RenderManager:
             # copies are already bounded by the input budgets; no deletion or
             # caller-controlled recursive cleanup is needed.
             try:
-                self._update(job_id, status="failed", stage="preparing",
-                             error="Render preparation failed")
+                if registered:
+                    self._update(job_id, status="failed", stage="preparing",
+                                 error="Render preparation failed")
+                else:
+                    self._jobs.pop(job_id, None)
+                    self._artifacts.pop(job_id, None)
+                    self._owned_jobs.discard(job_id)
+                    self._registry_jobs.pop(job_id, None)
             finally:
+                _unlock(self._job_locks.pop(job_id))
                 self._slots.release()
             raise
         return self.get_job(job_id)
@@ -267,12 +753,11 @@ class RenderManager:
         subjects = json.loads(config.read_text(encoding="utf-8"))
         if job["subject"] not in {s["folder"] for s in subjects["subjects"]}:
             raise RenderError("Subject is not in subjects.json")
-        source = _safe(repo / job["subject"] / job["round"])
-        if not source.is_dir():
-            raise RenderError("Round directory not found")
+        plan = job.get("plan")
+        rounds = plan["rounds"] if plan else [job["round"]]
+        files = self._source_files(repo, job["subject"], rounds, seq)
         build = _safe(repo / "tools" / "build.py")
-        _regular(build, self.MAX_FILE_BYTES)
-        build_bytes = build.read_bytes()
+        build_bytes = self._read_source(build)
         if hashlib.sha256(build_bytes).hexdigest() not in _BUILD_HASHES:
             raise RenderError("Unreviewed build.py; source digest is not approved")
         code = build_bytes.decode("utf-8")
@@ -280,30 +765,7 @@ class RenderManager:
             raise RenderError("Reviewed compiler argv was not found exactly once")
         snapshot = job_dir / "snapshot"
         snapshot.mkdir()
-        # Explicit files plus numbered fragments and image assets in this round.
-        files = [config, build, _safe(repo / "latex" / "kapa-exam.sty")]
-        walked = 0
-        for base, dirs, names in os.walk(source, followlinks=False):
-            for name in dirs + names:
-                walked += 1
-                if walked > self.MAX_FILES:
-                    raise RenderError("Input file count budget exceeded")
-                _safe(Path(base) / name)
-            # No hidden dirs or unrelated payloads are copied.
-            dirs[:] = [d for d in dirs if re.fullmatch(r"[A-Za-z0-9_-]+", d)]
-            for name in names:
-                path = Path(base) / name
-                if path.parent == source and re.fullmatch(r"[0-9]{2}\.tex", name):
-                    if seq is None or name in ("00.tex", f"{seq}.tex"):
-                        files.append(path)
-                elif (path.parent == source / "figures" and path.suffix.lower() in _ASSETS
-                      and re.fullmatch(r"[0-9]{2}-[A-Za-z0-9_-]+\.(?:png|jpe?g|pdf)", name, re.I)
-                      and (seq is None or name.startswith(seq + "-"))):
-                    files.append(path)
-        if seq and source / f"{seq}.tex" not in files:
-            raise RenderError("Question not found")
-        if not any(p.suffix == ".tex" and p.name != "00.tex" for p in files):
-            raise RenderError("Round has no question fragments")
+        source = repo / job["subject"] / job["round"]
         total = 0
         inputs = []
         copied_files, copied_dirs = {}, {snapshot}
@@ -340,12 +802,19 @@ class RenderManager:
                 parent = parent.parent
             inputs.append({"path": rel.as_posix(), "sha256": original_hash,
                            "snapshot_sha256": hashlib.sha256(data).hexdigest()})
+        if plan:
+            actual = {entry['path']: entry['sha256'] for entry in inputs}
+            if actual != plan['source_hashes']:
+                raise RenderError("Plan sources changed; create a new plan")
+            self._prepare_selection(snapshot, plan, copied_files, copied_dirs)
         with self._lock:
             self._copied_inputs[job["job_id"]] = (copied_files, copied_dirs)
         argv = [sys.executable, "-I", "-B", "tools/build.py"]
         if job["noanswers"]:
             argv.append("--noanswers")
-        if seq:
+        if plan:
+            argv = [sys.executable, "-I", "-B", "selection_driver.py"]
+        elif seq:
             argv += ["--single", f"{job['subject']}/{job['round']}/{seq}.tex"]
             if (source / "00.tex").is_file():
                 job["warnings"].append("Upstream --single does not include 00.tex common instructions; preserved in snapshot only.")
@@ -392,16 +861,22 @@ class RenderManager:
         return env
 
     def _update(self, job_id, **fields):
-        with self._lock:
+        with self._lock, self._registry_lock():
+            data = self._registry_read()
+            if job_id not in self._jobs or (job_id in self._job_digests and job_id not in data['jobs']):
+                raise RenderError("Job metadata was retired")
+            # A plan may expire between source validation and job reservation.
+            # Once preparing is registered its owner lock pins that plan.
+            plan_id = self._jobs[job_id].get('plan_id')
+            if plan_id and plan_id not in data['plans']:
+                raise RenderError("Plan metadata was retired")
             self._jobs[job_id].update(fields)
             job_dir = _safe(self.jobs_dir / job_id)
-            temporary = _safe(job_dir / "manifest.tmp")
             target = _safe(job_dir / "manifest.json")
-            for path in (temporary, target):
-                if path.exists():
-                    _regular(path, self.MAX_FILE_BYTES)
-            temporary.write_text(json.dumps(self._jobs[job_id], ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(target)
+            data = json.dumps(self._jobs[job_id], ensure_ascii=False, indent=2).encode('utf-8')
+            self._atomic_metadata(target, data, self.MANIFEST_BYTES)
+            self._registry_jobs[job_id] = hashlib.sha256(data).hexdigest()
+            self._save_registry(locked=True)
 
     def _capture(self, stream, path, result):
         count = 0
@@ -532,6 +1007,7 @@ class RenderManager:
                 try:
                     self._publish(job_id, outcome, pending)
                 finally:
+                    _unlock(self._job_locks.pop(job_id))
                     self._slots.release()
 
     def _publish(self, job_id, outcome, pending):
@@ -627,6 +1103,11 @@ class RenderManager:
         return pending
 
     def get_job(self, job_id):
+        cached = self._jobs.get(job_id) if isinstance(job_id, str) else None
+        foreign_active = (cached and job_id not in self._owned_jobs
+                          and cached['status'] in ('preparing', 'queued', 'running'))
+        if self._uuid(job_id) and (cached is None or foreign_active or self._registry_changed()):
+            self._refresh_registry()
         with self._lock:
             if not isinstance(job_id, str) or job_id not in self._jobs:
                 raise RenderError("Unknown or unowned job ID")

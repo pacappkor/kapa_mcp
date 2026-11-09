@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -27,6 +28,13 @@ build.mkdir()
 (ROOT / 'observed.json').write_text(json.dumps({'argv':sys.argv[1:], 'compiler':cmd, 'env':dict(os.environ), 'isolated':sys.flags.isolated, 'bytecode':sys.dont_write_bytecode}))
 MODE
 '''
+
+
+def _join_owned_render_workers(workers):
+    for worker in workers:
+        worker.join(timeout=15)
+        if worker.is_alive():
+            raise AssertionError("Owned render worker did not finish")
 
 
 class RenderTests(unittest.TestCase):
@@ -55,14 +63,35 @@ class RenderTests(unittest.TestCase):
         (self.repo / "civil_law" / "36").mkdir()
         self.settings = Settings(self.workspace, self.root / "jobs")
         self.manager = render.RenderManager(self.settings)
+        self._render_workers = []
+        self.addCleanup(_join_owned_render_workers, self._render_workers)
+        original_start = threading.Thread.start
+
+        def track_start(worker, *args, **kwargs):
+            target = getattr(worker, '_target', None)
+            owner = getattr(target, '__self__', None)
+            owned = (getattr(target, '__func__', None) is render.RenderManager._run
+                     and owner.jobs_dir == self.settings.jobs_dir)
+            result = original_start(worker, *args, **kwargs)
+            if owned:
+                self._render_workers.append(worker)
+            return result
+
+        self._patch('kapa_mcp.render.threading.Thread.start', autospec=True, side_effect=track_start)
         self.patches = []
         self._fake_build()
         # Installed Python stands in for discovery only. No TeX process runs.
         self._patch("kapa_mcp.render.shutil.which", return_value=str(Path(sys._base_executable).resolve()))
 
     def tearDown(self):
-        for job in list(self.manager._jobs.values()):
-            self._wait(job)
+        try:
+            for job in list(self.manager._jobs.values()):
+                self._wait(job)
+        finally:
+            # A published terminal status can precede the worker's final lock
+            # close. Join the exact fixture-owned workers, including managers
+            # sharing this jobs directory; never wait on unrelated threads.
+            _join_owned_render_workers(self._render_workers)
 
     def _patch(self, target, **kw):
         item = patch(target, **kw)
@@ -88,6 +117,50 @@ class RenderTests(unittest.TestCase):
                 return result
             time.sleep(0.02)
         self.fail("Fake build did not terminate")
+
+    def test_fixture_joins_worker_after_terminal_status_before_owner_lock_close(self):
+        closing, allow_close, joining = threading.Event(), threading.Event(), threading.Event()
+        original_unlock = render._unlock
+        owner_handles = []
+
+        def gated_unlock(stream):
+            if Path(stream.name).name == 'owner.lock':
+                owner_handles.append(stream)
+                closing.set()
+                if not allow_close.wait(5):
+                    raise AssertionError('Fixture did not join the owned worker')
+            return original_unlock(stream)
+
+        def release_on_join():
+            if joining.wait(5):
+                allow_close.set()
+
+        release_thread = threading.Thread(target=release_on_join)
+        with patch('kapa_mcp.render._unlock', side_effect=gated_unlock):
+            try:
+                job = self._wait(self._start())
+                self.assertEqual(job['status'], 'succeeded')
+                self.assertTrue(closing.wait(5))
+                self.assertFalse(self.manager._job_locks)
+                self.assertEqual(len(self._render_workers), 1)
+                worker = self._render_workers[0]
+                self.assertTrue(worker.is_alive())
+                original_join = worker.join
+
+                def observed_join(*args, **kwargs):
+                    joining.set()
+                    return original_join(*args, **kwargs)
+
+                release_thread.start()
+                with patch.object(worker, 'join', side_effect=observed_join):
+                    _join_owned_render_workers(self._render_workers)
+                self.assertTrue(owner_handles[0].closed)
+                self.assertEqual(self._render_workers, [worker])
+            finally:
+                allow_close.set()
+                if release_thread.ident is not None:
+                    release_thread.join(timeout=5)
+                _join_owned_render_workers(self._render_workers)
 
     def test_round_isolated_argv_environment_manifest_and_metadata(self):
         original = {str(p.relative_to(self.repo)): p.read_bytes() for p in self.repo.rglob("*") if p.is_file()}
@@ -176,7 +249,7 @@ class RenderTests(unittest.TestCase):
         with self.assertRaisesRegex(render.RenderError, "Unreviewed"):
             self._start()
 
-    def test_failed_preparations_remain_owned_and_count_toward_limit(self):
+    def test_failed_preparations_remain_owned_until_retention_retires_metadata(self):
         self.manager.MAX_JOBS = 2
         # Copy subjects.json and build.py, then fail on the style budget.
         style = self.repo / "latex" / "kapa-exam.sty"
@@ -185,7 +258,7 @@ class RenderTests(unittest.TestCase):
         for _ in range(2):
             with self.assertRaisesRegex(render.RenderError, "budget"):
                 self._start()
-        dirs = {p.name for p in self.settings.jobs_dir.iterdir()}
+        dirs = {p.name for p in self.settings.jobs_dir.iterdir() if p.is_dir()}
         self.assertEqual(dirs, set(self.manager._jobs))
         self.assertEqual(len(dirs), 2)
         for jid in dirs:
@@ -196,9 +269,10 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "manifest.json").read_text(encoding="utf-8")), job)
             self.assertTrue((root / "snapshot" / "tools" / "build.py").is_file())
             self.assertFalse((root / "snapshot" / "observed.json").exists())
-        with self.assertRaisesRegex(render.RenderError, "registry"):
+        with self.assertRaisesRegex(render.RenderError, "budget"):
             self._start()
-        self.assertEqual(dirs, {p.name for p in self.settings.jobs_dir.iterdir()})
+        self.assertTrue(dirs <= {p.name for p in self.settings.jobs_dir.iterdir() if p.is_dir()})
+        self.assertEqual(len(self.manager._jobs), 2)
         self.assertTrue(self.manager._slots.acquire(blocking=False))
         self.manager._slots.release()
 
@@ -465,8 +539,8 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(self._wait(first)["status"], "succeeded")
         self.assertEqual(self._wait(second)["status"], "succeeded")
         self.manager.MAX_JOBS = 2
-        with self.assertRaisesRegex(render.RenderError, "registry"):
-            self._start()
+        self.assertEqual(self._wait(self._start())["status"], "succeeded")
+        self.assertEqual(len(self.manager._jobs), 2)
 
     def test_copy_and_output_resource_limits(self):
         self.manager.MAX_COPY_BYTES = 1
@@ -584,8 +658,7 @@ class RenderTests(unittest.TestCase):
             with self.assertRaises(render.RenderError):
                 self.manager.get_artifact(job["job_id"], value)
         another = render.RenderManager(self.settings)
-        with self.assertRaises(render.RenderError):
-            another.get_job(job["job_id"])
+        self.assertEqual(another.get_job(job["job_id"]), job)
         response = self.manager.get_artifact(job["job_id"], artifact["artifact_id"])
         Path(response["download_path"]).write_bytes(b"changed!")
         with self.assertRaisesRegex(render.RenderError, "changed"):

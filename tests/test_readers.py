@@ -683,6 +683,35 @@ def _git_fixture(root, files, fmt="sha1", assume_unchanged=()):
     return commit
 
 
+class SupplementalReaderTests(unittest.TestCase):
+    setUp = ReaderTests.setUp
+    write = ReaderTests.write
+    def test_identity_hold_preserves_distinct_assertions_without_formal_identity(self):
+        research = '{"items": [{"item": "reply-1730"}]}'
+        self.write("kapa_knowledge", "runs/pilot/held-items-research.json", research)
+        record = {"id": "identity-hold/molit/reply-1730", "kind": "identity-hold",
+                  "identity_status": "unresolved", "publication_hold": True,
+                  "assertions": [{"source_id": "101", "date": "2020-01-01"},
+                                 {"source_id": "202", "date": "2020-02-01"}],
+                  "evidence_file": "runs/pilot/held-items-research.json",
+                  "evidence_sha256": hashlib.sha256(research.encode()).hexdigest()}
+        self.write("kapa_knowledge", "catalogs/materials.json", json.dumps({
+            "schema": 1, "catalog_type": "unpublished-evidence", "records": [record]}))
+        result = self.catalog.read_material(record["id"])
+        self.assertEqual(result["record"]["assertions"], record["assertions"])
+        self.assertFalse(result["formal_interpretation"])
+        self.assertFalse(result["source_verified"])
+        self.assertFalse(result["review_verified"])
+        self.assertTrue(result["missing_items"])
+
+    def test_vendor_allowlist_excludes_statute_bodies_and_arbitrary_research(self):
+        for relative in ("vendor/kapa_skills/laws/topic/source.md",
+                         "vendor/kapa_skills/README.md", "runs/pilot/arbitrary.json",
+                         "catalogs/arbitrary.json"):
+            with self.subTest(relative=relative), self.assertRaises(ValueError):
+                self.catalog.read_document("kapa_knowledge:" + relative)
+
+
 class GitStateTests(unittest.TestCase):
     def test_head_audit_shares_aggregate_budget_and_never_claims_unseen_content(self):
         with tempfile.TemporaryDirectory() as tmp:

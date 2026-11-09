@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Stdio entry point. Stdout is reserved exclusively for MCP protocol traffic."""
+"""Stdio by default; explicit authenticated loopback HTTP is optional."""
 
 import sys
 
-from .config import ConfigurationError, Settings
+from .config import ConfigurationError, HTTPSettings, Settings, transport_from_env
 
 
 def main() -> int:
     try:
         settings = Settings.from_env()
+        transport = transport_from_env()
+        http = HTTPSettings.from_env() if transport == "streamable-http" else None
     except (ConfigurationError, OSError, ValueError):
         # ConfigurationError messages contain variable names, never supplied values.
         error = sys.exception()
@@ -18,7 +20,13 @@ def main() -> int:
     try:
         from .server import create_server
 
-        create_server(settings).run(transport="stdio")
+        server = create_server(settings)
+        if http is None:
+            server.run(transport="stdio")
+        else:
+            from .remote import run_http
+
+            run_http(server, http)
     except KeyboardInterrupt:
         return 0
     except Exception:
