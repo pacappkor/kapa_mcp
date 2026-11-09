@@ -1,0 +1,10 @@
+# KAPA MCP adapter
+
+- Keep this project and every upstream repository private. User explicitly reaffirmed this requirement on 2026-11-09. Do not publish packages or expose a public endpoint.
+- This project connects existing KAPA repositories; it does not duplicate their datasets, call model APIs, update upstream content, fetch law APIs, or manage upstream review status.
+- Never read credential files (`edu_gh_token.txt`, `law_oc.txt`) or expose environment secrets. Do not import upstream production code with credential fallback for read-only queries.
+- Upstream repositories are read-only inputs. Build artifacts belong in isolated job directories, never upstream build folders. No arbitrary shell or filesystem read tools.
+- New code: SPDX-License-Identifier: GPL-3.0-only, UTF-8, LF. No personal absolute paths in committed files.
+- Work on a feature branch; no direct default-branch commits. Changes to the adapter should be independently testable with small synthetic fixtures.
+- Current module contract: `config.py` provides `Settings(workspace: Path, jobs_dir: Path)` and `Settings.from_env()`; `readers.py` provides `Catalog(settings)` with `list_repositories()`, `search_questions(query='', exam=None, subject=None, round=None, limit=20, offset=0)`, `read_question(question_id)`, `search_knowledge(query, repo=None, limit=20, offset=0)`, `read_document(document_id, offset=0, max_chars=12000)`, `get_relations(material_id, review=None)`, `route_task(task)` returning JSON-serializable dicts. Document IDs use `<repo>:<allowed-relative-path>` and question IDs `edu/<1|2>/<subject>/<round>/<seq>`. `render.py` provides `RenderManager(settings)` with `start_render(exam, subject, round, question_id=None, noanswers=True)`, `get_job(job_id)`, `get_artifact(job_id, artifact_id)`.
+- Configuration must be explicit via KAPA_WORKSPACE (parent of four repositories) and KAPA_JOBS_DIR, with useful startup errors; do not assume the desktop path. Repository aliases: kapa_edu_1, kapa_edu_2, kapa_skills, kapa_knowledge.
