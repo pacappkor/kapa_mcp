@@ -19,18 +19,32 @@
 A registration listing alone does not prove a protocol handshake. SDK tests are
 not native chat acceptance; successful reads are not legal verification.
 
-### Important current dependency warning
+### Consistent dependency snapshots
 
-The bundled `kapa_skills` main snapshot is
-`f06f552573655cbab70480b2785caa6c738939ac`, while the pinned knowledge
-snapshot's `deps.lock` references skills
-`b8d9d8d93e59d0a7da29d0fe120177ea9b0d1b02`. Therefore a successful setup can
-still report `version_unresolved`. This is intentional transparency: setup pins
-are installation snapshots, not a replacement for upstream dependency locks.
-Do not edit the lock, suppress warnings, or claim full evidence reproducibility.
-Pinned vendored metadata has its own provenance checks and still does not prove
-historical article text. A future reviewed upstream release must reconcile the
-pins; the installer does not modify upstream content to make checks pass.
+The bundled `kapa_skills` snapshot is
+`b8d9d8d93e59d0a7da29d0fe120177ea9b0d1b02`, exactly the revision referenced by
+`deps.lock` in knowledge snapshot `a023555fd288718a84e592bf463d407b4dd52cfa`.
+A clean installation should resolve this dependency without `version_unresolved`.
+If that warning appears, inspect the actual revisions, dirty flags and lock
+provenance; do not edit the upstream lock or suppress warnings. Pinned vendored
+metadata has separate provenance checks and does not prove historical article
+text, legal accuracy or complete evidence coverage.
+
+**When bumping pins, verify knowledge deps.lock matches the skills pin.** Read
+`deps.lock` from the exact proposed knowledge commit (not its current worktree),
+compare `kapa_skills.commit` with the proposed skills pin, and check any other
+upstream dependency manifests. Refresh `tests/fixtures/knowledge-deps.lock` from
+that commit and run
+`uv run --locked --extra test pytest -q tests/test_dependency_pins.py`.
+The offline consistency test checks that fixture against the packaged pins;
+maintainers must verify the fixture's provenance when updating it. Then run setup
+in a new temporary workspace and repeat the catalog/route health check above.
+The installer never modifies upstream content to make checks pass.
+
+For an end-to-end check of an **uncommitted local checkout**, bypass uv's package
+cache so changed package data is rebuilt (a cached tool can still contain older
+pins): `uv --no-cache tool run --from . kapa-mcp-setup --workspace <NEW_TEMP_DIR>`.
+Do not register this test workspace in real client configurations.
 
 ## Update
 

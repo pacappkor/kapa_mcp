@@ -3,7 +3,7 @@
   "repositories": {
     "kapa_edu_1": {"url": "https://github.com/pacappkor/kapa_edu_1", "commit": "48dccdd83fe017927c58c3f57e0dde0e23225ae8"},
     "kapa_edu_2": {"url": "https://github.com/pacappkor/kapa_edu_2", "commit": "a51ff471a90d2676bd474b26e4e95f1f73d1aa61"},
-    "kapa_skills": {"url": "https://github.com/pacappkor/kapa_skills", "commit": "f06f552573655cbab70480b2785caa6c738939ac"},
+    "kapa_skills": {"url": "https://github.com/pacappkor/kapa_skills", "commit": "b8d9d8d93e59d0a7da29d0fe120177ea9b0d1b02"},
     "kapa_knowledge": {"url": "https://github.com/pacappkor/kapa_knowledge", "commit": "a023555fd288718a84e592bf463d407b4dd52cfa"}
   }
 }

@@ -52,6 +52,21 @@ def load_pins():
     return pins
 
 
+def validate_dependency_pins(pins, deps_lock_text):
+    """Offline maintainer check against the exact knowledge commit's deps.lock."""
+    try:
+        dependency = json.loads(deps_lock_text)['kapa_skills']
+        commit = dependency['commit']
+        vendor_commit = dependency['vendor']['commit']
+        matches = (isinstance(commit, str)
+                   and re.fullmatch(r'[0-9a-f]{40}', commit)
+                   and commit == pins['kapa_skills']['commit'] == vendor_commit)
+    except (ValueError, KeyError, TypeError):
+        matches = False
+    if not matches:
+        raise SetupError('Knowledge deps.lock must match the skills pin and vendor revision')
+
+
 def _check_existing(target, pin, update):
     _plain_path(target / '.git')
     if not (target / '.git').is_dir():
