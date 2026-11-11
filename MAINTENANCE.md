@@ -201,7 +201,7 @@ checkout/push에는 `GITHUB_TOKEN`만 사용한다. Actions 정책은 `contents:
 `traffic`은 main 전체 내용에 `.traffic/` 집계 데이터만 추가하고 매일 main을 동기화하는
 counting 브랜치다. 수동 개발·main 역병합을 하지 않는다. API는 최근 14일만 제공하므로
 최초 실행 이전 이력과 14일 넘는 수집 중단 구간은 복원할 수 없다.
-중앙 `pacappkor/.github`의 `@main`은 신뢰 채널이므로 중앙 변경도 리뷰해야 한다.
+caller는 중앙 재사용 워크플로를 검토된 full commit SHA로 고정한다. 중앙 워크플로는 같은 commit(`job.workflow_sha`)의 scripts를 쓴다. 중앙 변경을 받아들일 때는 해당 commit을 검토한 뒤 이 저장소의 SHA를 명시적으로 올린다. `@main` 같은 가변 참조로 되돌리지 않는다.
 이 workflow는 GitHub 저장소 통계 집계이며 MCP endpoint나 어댑터의 게시 기능이 아니다.
 
 ## 개발자 변경
