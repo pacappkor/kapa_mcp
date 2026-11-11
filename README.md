@@ -1,11 +1,17 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
-# Private KAPA MCP adapter
+# Local KAPA MCP adapter
 
-[MCP 어댑터 유지보수 안내](MAINTENANCE.md)
+[![visitors](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/pacappkor/kapa_mcp/traffic/.traffic/badge-views.json)](https://github.com/pacappkor/kapa_mcp)
+[![clones](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/pacappkor/kapa_mcp/traffic/.traffic/badge-clones.json)](https://github.com/pacappkor/kapa_mcp)
 
-이 패키지와 네 원본 저장소는 **private 유지**가 필수다. 공개 패키지 업로드,
-공개 저장소 생성, 공개 endpoint 배포를 하지 않는다. 기본 stdio와 명시적으로 켜는
-인증된 loopback Streamable HTTP를 제공하며 모델 API나 법령 API 키가 필요하지 않다.
+[MCP 어댑터 유지보수 안내](MAINTENANCE.md) · [보안 취약점 비공개 신고](SECURITY.md)
+
+이 어댑터와 원본 저장소는 공개할 수 있지만 **로컬 전용 사용** 경계는 유지한다.
+저장소 공개 여부는 접근 권한의 근거가 아니다. 공개 endpoint·터널 배포와 어댑터의
+게시 기능은 제공하지 않는다. 기본 stdio와 명시적으로 켜는 인증된 loopback
+Streamable HTTP를 제공하며 모델 API나 법령 API 키가 필요하지 않다.
+소스 공개와 패키지 배포는 별개이며 패키지 업로드는 계속 금지한다.
+공개되었다고 해서 법적 정확성이나 공식 정답 지위를 보증하지 않는다.
 
 ## 범위와 계약
 

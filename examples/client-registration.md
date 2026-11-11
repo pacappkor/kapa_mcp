@@ -2,11 +2,13 @@
 # 로컬 stdio 등록 예시
 
 기본 전송은 계속 stdio다. 선택 가능한 인증 loopback HTTP의 환경변수·보안 경계·검증과
-아직 완료하지 않은 chat 연결 조건은 [private HTTP 안내](private-http.md)를 참고한다.
+아직 완료하지 않은 chat 연결 조건은 [인증된 loopback HTTP 안내](private-http.md)를 참고한다.
 실제 클라이언트 설정은 이 문서나 adapter가 자동으로 변경하지 않는다.
 
 가상환경과 환경변수 설정을 확인한 뒤 사용할 클라이언트에 등록한다.
-adapter와 원본 저장소는 private로 유지하며 패키지 공개 업로드나 원격 endpoint 생성은 하지 않는다.
+adapter와 원본 저장소는 공개할 수 있지만 저장소 공개 여부는 접근 권한의 근거가 아니다.
+로컬 전용 사용과 기존 인증·loopback 경계를 유지하며 패키지 업로드, 어댑터를 통한 게시,
+공개 endpoint·터널 생성은 하지 않는다.
 먼저 가상환경에 `kapa-mcp`를 정상 설치하고 두 디렉터리 설정을 검증한다.
 
 아래 PowerShell 명령의 세 placeholder를 해당 실행 환경의 절대경로로 교체한다.

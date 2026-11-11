@@ -2,7 +2,7 @@
 
 - [MCP 어댑터 유지보수 안내](MAINTENANCE.md)
 
-- Keep this project and every upstream repository private. User explicitly reaffirmed this requirement on 2026-11-09. Do not publish packages or expose a public endpoint.
+- This adapter and upstream repositories may be public under the 2026-11-11 policy. Keep the MCP server local-only: stdio or authenticated loopback HTTP, never a public endpoint or tunnel. Repository visibility is not an authorization signal. Do not publish packages or add publication from the adapter; preserve existing authentication and loopback boundaries.
 - This project connects existing KAPA repositories; it does not duplicate their datasets, call model APIs, update upstream content, fetch law APIs, or manage upstream review status.
 - Never read credential files (`edu_gh_token.txt`, `law_oc.txt`) or expose environment secrets. Do not import upstream production code with credential fallback for read-only queries.
 - Upstream repositories are read-only inputs. Build artifacts belong in isolated job directories, never upstream build folders. No arbitrary shell or filesystem read tools.

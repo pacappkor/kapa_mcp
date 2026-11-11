@@ -34,7 +34,8 @@ Legacy kapa_start_render remains available for round/single-question formatting.
 Render and evidence writes only isolated jobs; never infer source approval from a bundle.
 No collection, refresh, index update, review change, upstream write, model API, or publication.
 Resources and prompts are optional navigation: tools provide the required fallback.
-Keep this adapter and all upstream repositories private.
+Use this adapter locally only; never expose a public endpoint or tunnel.
+Repository visibility is not an authorization signal. Preserve authentication and loopback boundaries.
 """
 
 
@@ -80,7 +81,7 @@ def create_server(
 
     @server.tool(annotations=read)
     def kapa_list_repositories() -> dict:
-        """List the four configured private repositories and their availability."""
+        """List the four configured local repositories and their availability."""
         return catalog.list_repositories()
 
     @server.tool(annotations=read)
