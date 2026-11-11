@@ -69,6 +69,13 @@ def validate_dependency_pins(pins, deps_lock_text):
 
 def _check_existing(target, pin, update):
     _plain_path(target / '.git')
+    # Inspect without following links, including metadata that Git status omits.
+    def walk_error(error):
+        raise SetupError('Cannot inspect checkout for links') from error
+
+    for root, directories, filenames in os.walk(target, followlinks=False, onerror=walk_error):
+        for name in directories + filenames:
+            _plain_path(Path(root) / name)
     if not (target / '.git').is_dir():
         raise SetupError(f'{target.name}: non-empty target is not a standalone checkout')
     if Path(_git(target, 'rev-parse', '--show-toplevel')).resolve() != target.resolve():
@@ -81,18 +88,18 @@ def _check_existing(target, pin, update):
     if any(not line.startswith('H ') for line in _git(target, 'ls-files', '-v').splitlines()):
         raise SetupError(f'{target.name}: hidden index entries are unsupported')
     head = _git(target, 'rev-parse', 'HEAD')
-    if head == pin['commit']:
-        return False
-    if not update:
-        raise SetupError(f'{target.name}: HEAD differs; use --update only for managed snapshots')
     marker = target / '.git' / 'kapa-setup.json'
     _plain_path(marker)
     try:
         previous = json.loads(marker.read_text('utf-8'))
     except (OSError, ValueError):
-        raise SetupError(f'{target.name}: not a managed snapshot; use a new workspace') from None
+        raise SetupError(f'{target.name}: missing or invalid installer marker; not a managed snapshot; use a new workspace') from None
     if previous != {'url': pin['url'], 'commit': head} or _git(target, 'branch', '--show-current'):
         raise SetupError(f'{target.name}: modified HEAD or branch; use a new workspace')
+    if head == pin['commit']:
+        return False
+    if not update:
+        raise SetupError(f'{target.name}: HEAD differs; use --update only for managed snapshots')
     return True
 
 

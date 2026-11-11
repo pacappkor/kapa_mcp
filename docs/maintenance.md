@@ -25,8 +25,9 @@ The bundled `kapa_skills` snapshot is
 `b8d9d8d93e59d0a7da29d0fe120177ea9b0d1b02`, exactly the revision referenced by
 `deps.lock` in knowledge snapshot `a023555fd288718a84e592bf463d407b4dd52cfa`.
 A clean installation should resolve this dependency without `version_unresolved`.
-If that warning appears, inspect the actual revisions, dirty flags and lock
-provenance; do not edit the upstream lock or suppress warnings. Pinned vendored
+If that warning appears, treat it as a genuine revision or provenance mismatch
+and investigate the actual revisions, dirty flags and lock provenance; do not
+edit the upstream lock or suppress warnings. Pinned vendored
 metadata has separate provenance checks and does not prove historical article
 text, legal accuracy or complete evidence coverage.
 
@@ -72,8 +73,11 @@ uvx --from "$package" kapa-mcp-setup --workspace "$workspace" --update || exit 1
 
 Manually change the client command's ref too, then restart and repeat verification.
 No client configuration is automatically changed. Updates require a clean
-installer-managed detached HEAD and matching origin/previous marker. Modified
-HEADs, branches, untracked/ignored files and hidden index flags are refused.
+installer-managed detached HEAD and matching origin/previous marker, even when
+HEAD already matches the requested pin. Modified HEADs, branches, missing or
+invalid markers, links, untracked/ignored files and hidden index flags are refused.
+A missing marker (including after a failed marker write) is not silently adopted;
+use a new workspace.
 Use a new workspace instead of resetting a personal checkout. Installation is
 not a four-repository transaction: a network failure can leave earlier repos
 updated or a partial clone. Inspect it; retry only once the state is understood,

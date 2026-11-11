@@ -44,8 +44,9 @@ HEAD를 확인한다. 출력된 `KAPA_WORKSPACE`, `KAPA_JOBS_DIR`를 설정한 �
 설치 관리 snapshot만 새 bundled pin으로 옮긴다. 서버 자체는 계속 읽기 전용이며
 client 설정을 자동 변경하지 않는다. Git 설치는 `uv.lock`의 전이 의존성 고정을
 적용하지 않으므로 완전한 lock 설치에는 아래 checkout 기반 절차를 사용한다.
-현재 skills pin과 knowledge `deps.lock`은 다르므로 `version_unresolved` 경고가
-발생할 수 있다. [검증 안내](docs/maintenance.md)의 제한을 보존한다.
+현재 skills pin과 knowledge `deps.lock`은 일치하므로 이 pin의 깨끗한 설치에서는
+`version_unresolved` 경고가 없어야 한다. 경고가 나타나면 실제 revision 또는 출처의
+불일치로 취급하고 [검증 안내](docs/maintenance.md)에 따라 조사한다.
 `kapa_runtime`의 시장자료 MCP `kapa-data`는 외부 사용자에게 아직 제공되지 않는다
 (coming later). 법적 정확성·공식 정답을 보증하지 않는다.
 
