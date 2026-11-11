@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # MCP 어댑터 유지보수
 
-이 문서는 **private MCP 어댑터 `kapa_mcp`만** 대상으로 한다. 원본도 private로 유지하고 공개 업로드·endpoint 배포를 하지 않는다.
+이 문서는 **로컬 전용 MCP 어댑터 `kapa_mcp`만** 대상으로 한다. 어댑터와 원본 저장소는 공개할 수 있지만 저장소 공개 여부는 접근 권한의 근거가 아니다. 기존 인증·loopback 경계를 유지하고 공개 endpoint·터널 배포나 어댑터를 통한 게시·패키지 업로드를 하지 않는다.
 자격증명 파일을 읽거나 토큰·환경 전체를 출력하지 않는다. 개인 경로와 비밀값을 문서에 저장하지 않는다.
 
 ## 읽기·사용 입구
@@ -183,6 +183,26 @@ if ($LASTEXITCODE -ne 0) { throw '롤백 버전 확인 실패: 재시작 중단'
 코드 롤백이 registry·bundle·plan 저장 형식의 하위 호환성을 보장하지는 않는다.
 호환되지 않으면 기존 jobs를 보존하고 별도의 빈 격리 `KAPA_JOBS_DIR`로 실행한다.
 필요한 로컬 실행 설정만 명시적으로 조정하며 기존 registry를 덮어쓰거나 파일을 삭제하지 않는다.
+
+## 공개 저장소 traffic 운영
+
+[Daily traffic](.github/workflows/traffic.yml)는 공통 조직 워크플로를 호출한다.
+기본 브랜치 `main`에 반영한 뒤 매일 03:17 UTC 실행하거나 수동 실행한다.
+GitHub 조회수와 clone 수의 누적치이며 uniques는 일별 합계로, 평생 중복 제거한 인원수가 아니다.
+첫 성공 실행 전과 raw/Shields 캐시 갱신 전에는 README 배지가 없거나 오류로 보일 수 있다.
+
+운영자가 조직 Actions secret `TRAFFIC_TOKEN`을 이 저장소에만 허용한다.
+fine-grained token은 `pacappkor`의 선택 저장소에 대한 **Administration: read-only**와
+자동 Metadata read만 필요하며 토큰 소유자의 traffic 관리자 접근도 필요하다.
+토큰을 파일·문서·로그에 넣지 않는다. 집계 API에만 이 secret을 사용하고 브랜치
+checkout/push에는 `GITHUB_TOKEN`만 사용한다. Actions 정책은 `contents: write`를,
+`traffic` 보호 규칙은 정상 push를 허용해야 한다. 강제 push나 보호 규칙 우회는 하지 않는다.
+
+`traffic`은 main 전체 내용에 `.traffic/` 집계 데이터만 추가하고 매일 main을 동기화하는
+counting 브랜치다. 수동 개발·main 역병합을 하지 않는다. API는 최근 14일만 제공하므로
+최초 실행 이전 이력과 14일 넘는 수집 중단 구간은 복원할 수 없다.
+중앙 `pacappkor/.github`의 `@main`은 신뢰 채널이므로 중앙 변경도 리뷰해야 한다.
+이 workflow는 GitHub 저장소 통계 집계이며 MCP endpoint나 어댑터의 게시 기능이 아니다.
 
 ## 개발자 변경
 

@@ -1,11 +1,14 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
-# Private loopback HTTP readiness
+# Authenticated loopback HTTP readiness
 
 The default remains stdio. HTTP must be enabled explicitly and binds only
 `127.0.0.1`; there is no public-bind, proxy-header trust, TLS, OAuth, account change,
 deployment, tunnel setup, or client configuration replacement in this adapter.
-All repositories and packages remain private. Binding localhost does not stop an
-authorized client from sharing retrieved content with its chosen model service.
+The adapter and upstream repositories may be public; repository visibility is not
+an authorization signal. Local-only use and existing authentication/loopback boundaries
+remain mandatory; package uploads and publication from the adapter are not allowed.
+Binding localhost does not stop an authorized client from sharing retrieved content
+with its chosen model service.
 
 ## Start locally
 
@@ -65,8 +68,8 @@ and Claude Code. Local client product versions must pass initialization, all 17
 tools' discovery, and a read before acceptance is recorded. The SDK legacy-mode
 test does not establish either product's protocol negotiation behavior.
 
-**ChatGPT/Claude chat acceptance: not yet verified.** Private repositories do not
-inherently prevent authenticated remote chat integration. It requires a separately
+**ChatGPT/Claude chat acceptance: not yet verified.** Repository visibility does not
+authorize remote access. Remote chat integration would require a separately
 configured reachable authenticated endpoint or supported tunnel, client/workspace
 permissions, transport/auth compatibility, and an actual tool handshake. None is
 deployed here, and the current authorization excludes public endpoints/tunnels.

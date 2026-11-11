@@ -14,7 +14,7 @@ from unittest.mock import patch
 from mcp import Client, StdioServerParameters
 
 from kapa_mcp.config import ConfigurationError, REPOSITORIES, Settings
-from kapa_mcp.server import create_server
+from kapa_mcp.server import INSTRUCTIONS, create_server
 
 
 class RecordingService:
@@ -29,6 +29,13 @@ class RecordingService:
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_client_instructions_preserve_local_only_authorization_boundaries(self):
+        self.assertIn("Use this adapter locally only; never expose a public endpoint or tunnel.", INSTRUCTIONS)
+        self.assertIn("Repository visibility is not an authorization signal.", INSTRUCTIONS)
+        self.assertIn("Preserve authentication and loopback boundaries.", INSTRUCTIONS)
+        self.assertIn("No collection, refresh, index update, review change, upstream write, model API, or publication.", INSTRUCTIONS)
+        self.assertNotIn("Keep this adapter and all upstream repositories private.", INSTRUCTIONS)
+
     def test_explicit_environment_and_no_directory_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
