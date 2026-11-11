@@ -19,6 +19,10 @@ test = ["pytest>=8,<10"]
 
 [project.scripts]
 kapa-mcp = "kapa_mcp.__main__:main"
+kapa-mcp-setup = "kapa_mcp.setup:main"
+
+[tool.setuptools.package-data]
+kapa_mcp = ["upstream_pins.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

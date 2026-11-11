@@ -27,6 +27,28 @@ plan과 opt-in loopback HTTP를 추가한다. 검색 결과의 경고·revision�
 
 ## 설치와 실행
 
+외부 사용자: [설치 사이트](https://pacappkor.github.io/kapa_mcp/) ·
+[저장소 내 설치 안내](docs/install.md). Claude Code, Claude Desktop, Codex의
+stdio 등록·환경변수·검증·업데이트·제거 절차를 제공한다. 사이트는 main 반영 후
+Pages 배포가 완료되어야 열린다. 아래 `<ref>`는 이 installer가 포함된 검토된
+태그 또는 전체 commit SHA로 교체한다(재현성을 위해 `main` 대신 SHA 권장).
+
+```text
+uvx --from git+https://github.com/pacappkor/kapa_mcp@<ref> kapa-mcp-setup --workspace <ABSOLUTE_NEW_WORKSPACE>
+uvx --from git+https://github.com/pacappkor/kapa_mcp@<ref> kapa-mcp
+```
+
+첫 명령은 별도 설치 전용 workspace에 네 공개 upstream의 bundled pin을 clone하고
+HEAD를 확인한다. 출력된 `KAPA_WORKSPACE`, `KAPA_JOBS_DIR`를 설정한 뒤 두 번째
+명령을 클라이언트가 실행한다(`KAPA_TRANSPORT=stdio`). 명시적 `--update`는 깨끗한
+설치 관리 snapshot만 새 bundled pin으로 옮긴다. 서버 자체는 계속 읽기 전용이며
+client 설정을 자동 변경하지 않는다. Git 설치는 `uv.lock`의 전이 의존성 고정을
+적용하지 않으므로 완전한 lock 설치에는 아래 checkout 기반 절차를 사용한다.
+현재 skills pin과 knowledge `deps.lock`은 다르므로 `version_unresolved` 경고가
+발생할 수 있다. [검증 안내](docs/maintenance.md)의 제한을 보존한다.
+`kapa_runtime`의 시장자료 MCP `kapa-data`는 외부 사용자에게 아직 제공되지 않는다
+(coming later). 법적 정확성·공식 정답을 보증하지 않는다.
+
 Python 3.12 이상, 공식 Python SDK **`mcp==2.3.0`** 하나만 지원한다.
 설치된 SDK의 `mcp.server.mcpserver.MCPServer`, `ToolAnnotations`, `Client`
 API를 확인했다. 1.x FastMCP와 혼용하지 않는다.

@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Documentation-only dependencies; not part of the server environment.
+mkdocs==1.6.1
+mkdocs-material==9.7.0
