@@ -1,6 +1,7 @@
 # KAPA MCP adapter
 
 - [MCP 어댑터 유지보수 안내](MAINTENANCE.md)
+- Default review ownership is declared in `.github/CODEOWNERS`.
 
 - This adapter and upstream repositories may be public under the 2026-11-11 policy. Keep the MCP server local-only: stdio or authenticated loopback HTTP, never a public endpoint or tunnel. Repository visibility is not an authorization signal. Do not publish packages or add publication from the adapter; preserve existing authentication and loopback boundaries.
 - This project connects existing KAPA repositories; it does not duplicate their datasets, call model APIs, update upstream content, fetch law APIs, or manage upstream review status.
