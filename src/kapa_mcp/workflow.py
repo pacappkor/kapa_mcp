@@ -92,9 +92,9 @@ class WorkflowManager:
                     if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > 1
                             or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)):
                         raise ValueError("Invalid evidence storage lock")
-                    if opened.st_size == 0:
-                        stream.write(b"0")
-                        stream.flush()
+                    # Windows permits byte-range locking beyond EOF. Acquire
+                    # before initializing: another client may already have locked
+                    # byte zero after both clients observed an empty file.
                     deadline = time.monotonic() + 10
                     while True:
                         try:
@@ -111,6 +111,9 @@ class WorkflowManager:
                                 raise ValueError("Evidence storage is busy") from None
                             time.sleep(0.02)
                     try:
+                        if os.fstat(stream.fileno()).st_size == 0:
+                            stream.write(b"0")
+                            stream.flush()
                         yield
                     finally:
                         stream.seek(0)

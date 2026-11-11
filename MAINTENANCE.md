@@ -20,7 +20,10 @@
 
 `kapa_edu_1`, `kapa_edu_2`, `kapa_skills`, `kapa_knowledge`는 읽기 전용 입력이다.
 각 저장소의 갱신은 **각자의 지침·승인 정책에 따르는 별도 작업**이다.
-여기서 네 저장소의 pull/update, 수집, 색인 갱신, 검토 상태 변경을 자동화하지 않는다.
+실행 중인 서버는 네 저장소의 pull/update, 수집, 색인 갱신, 검토 상태 변경을 자동화하지 않는다.
+별도 `kapa-mcp-setup`은 사용자가 명시적으로 실행할 때만 전용 설치 workspace를
+생성하고 `--update`로 깨끗한 installer-managed detached snapshot을 bundled pin으로
+옮긴다. 기존 연구 checkout에는 사용하지 않는다. [설치 유지보수](docs/maintenance.md)를 따른다.
 아래 Git 명령도 어댑터 저장소에서만 실행한다. 재귀 갱신이나 일괄 upstream 갱신은 하지 않는다.
 일반 검색·발견·읽기는 현재 로컬 checkout을 읽으며 원격 최신본을 자동으로 가져오지 않는다.
 이미 고정된 evidence bundle과 render plan은 원본 변경 후 stale 상태일 수 있다.
