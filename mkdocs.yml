@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-only
+site_name: KAPA MCP installation
+site_url: https://pacappkor.github.io/kapa_mcp/
+repo_url: https://github.com/pacappkor/kapa_mcp
+strict: true
+theme:
+  name: material
+nav:
+  - Overview and safety: index.md
+  - Install and connect: install.md
+  - Verify and maintain: maintenance.md
